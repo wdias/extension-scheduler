@@ -18,8 +18,8 @@ const (
 	adapterExtension = "http://adapter-extension.default.svc.cluster.local"
 )
 
-// Timeseries blabla
-type timeseries struct {
+// Timeseries : Timeseries structure with timeseriesId and metadataIds
+type Timeseries struct {
 	TimeseriesID   string `json:"timeseriesId"`
 	ModuleID       string `json:"moduleId"`
 	ValueType      string `json:"valueType"`
@@ -38,14 +38,15 @@ type Extensions []struct {
 		InputVariables  []string `json:"inputVariables"`
 		OutputVariables []string `json:"outputVariables"`
 		Variables       []struct {
-			TimeseriesID string `json:"timeseriesId"`
-			VariableID   string `json:"variableId"`
+			Timeseries Timeseries `json:"timeseries"`
+			VariableID string     `json:"variableId"`
 		} `json:"variables"`
 	} `json:"data"`
 	Options json.RawMessage `json:"options"`
 }
 
-func getTimeseries(timeseriesID string, metadata *timeseries) error {
+// TODO: Remove
+func getTimeseries(timeseriesID string, metadata *Timeseries) error {
 	fmt.Println("URL:", fmt.Sprint(adapterMetadata, "/timeseries/", timeseriesID))
 	response, err := netClient.Get(fmt.Sprint(adapterMetadata, "/timeseries/", timeseriesID))
 	if err != nil {
@@ -110,6 +111,7 @@ func main() {
 			ctx.JSON(iris.Map{"response": err.Error()})
 			return
 		}
+		// Trigger each matching Extension
 		for _, extension := range extensions {
 			extensionURL := fmt.Sprint("http://extension-", strings.ToLower(extension.Extension), ".default.svc.cluster.local")
 			jsonValue, _ := json.Marshal(extension)
