@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/kataras/iris"
+	"github.com/robfig/cron"
 )
 
 const (
-	adapterMetadata  = "http://adapter-metadata.default.svc.cluster.local"
 	adapterExtension = "http://adapter-extension.default.svc.cluster.local"
 )
 
-// Timeseries : Timeseries structure with timeseriesId and metadataIds
+// Timeseries Timeseries structure with timeseriesId and metadataIds
 type Timeseries struct {
 	TimeseriesID   string `json:"timeseriesId"`
 	ModuleID       string `json:"moduleId"`
@@ -45,31 +45,34 @@ type Extensions []struct {
 	Options json.RawMessage `json:"options"`
 }
 
-// TODO: Remove
-func getTimeseries(timeseriesID string, metadata *Timeseries) error {
-	fmt.Println("URL:", fmt.Sprint(adapterMetadata, "/timeseries/", timeseriesID))
-	response, err := netClient.Get(fmt.Sprint(adapterMetadata, "/timeseries/", timeseriesID))
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	body, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode != 200 {
-		return fmt.Errorf("Unable to find Timeseries: %q", timeseriesID)
-	}
-	err = json.Unmarshal(body, &metadata)
-	return nil
+// Triggers Extensions per each Unique OnTime trigger
+type Triggers []struct {
+	TriggerOn  string     `json:"trigger_on"`
+	Extensions Extensions `json:"extensions"`
 }
 
-func getExtensions(triggerType string, timeseriesID string, extensions *Extensions) error {
-	fmt.Println("GET Extensions:", fmt.Sprint(" triggerType:", triggerType, " timeseriesID:", timeseriesID))
-	path := fmt.Sprint(adapterExtension, "/extension/trigger_type/", triggerType)
-	if timeseriesID != "" {
-		path = fmt.Sprint(path, "?timeseriesId=", timeseriesID)
+// Run Post a trigger request when cron job executed
+func (extensions Extensions) Run() {
+	for _, extension := range extensions {
+		fmt.Println(extension)
+		extensionSVC := fmt.Sprint("http://extension-", strings.ToLower(extension.Extension), ".default.svc.cluster.local")
+		extensionURL := fmt.Sprint(extensionSVC, "/extension/", strings.ToLower(extension.Extension), "/trigger/", extension.ExtensionID)
+		jsonValue, _ := json.Marshal(extension)
+		resp, err := netClient.Post(extensionURL, "application/json", bytes.NewBuffer(jsonValue))
+		if err != nil {
+			fmt.Println("Error: Send to extension:", extensionURL, err.Error())
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			fmt.Println("Send request failed:", extensionURL, err.Error())
+		}
+		fmt.Println("Trigger ", extension.ExtensionID, extensionURL)
 	}
+}
+
+func getTriggerExtensions(triggerType string, triggers *Triggers) error {
+	fmt.Println("GET Extensions:", fmt.Sprint(" triggerType:", triggerType))
+	path := fmt.Sprint(adapterExtension, "/extension/trigger_type/", triggerType)
 	response, err := netClient.Get(path)
 	if err != nil {
 		return err
@@ -80,9 +83,9 @@ func getExtensions(triggerType string, timeseriesID string, extensions *Extensio
 		return err
 	}
 	if response.StatusCode != 200 {
-		return fmt.Errorf("Unable to find Timeseries: %q", timeseriesID)
+		return fmt.Errorf("Unable to find OnTime Triggers")
 	}
-	err = json.Unmarshal(body, &extensions)
+	err = json.Unmarshal(body, &triggers)
 	return nil
 }
 
@@ -102,28 +105,19 @@ var netClient = &http.Client{
 
 func main() {
 	app := iris.Default()
-	app.Get("/onchange/{timeseriesID:string}", func(ctx iris.Context) {
-		timeseriesID := ctx.Params().Get("timeseriesID")
-		fmt.Println("timeseriesID:", timeseriesID)
-		var extensions Extensions
-		err := getExtensions("OnChange", timeseriesID, &extensions)
-		if err != nil {
-			ctx.JSON(iris.Map{"response": err.Error()})
-			return
-		}
-		// Trigger each matching Extension
-		for _, extension := range extensions {
-			extensionURL := fmt.Sprint("http://extension-", strings.ToLower(extension.Extension), ".default.svc.cluster.local")
-			jsonValue, _ := json.Marshal(extension)
-			resp, err := netClient.Post(fmt.Sprint(extensionURL, "/extension/", strings.ToLower(extension.Extension), "/trigger/", extension.ExtensionID), "application/json", bytes.NewBuffer(jsonValue))
-			if err != nil {
-				fmt.Println("Error: Send to extension:", extensionURL, err)
-			}
-			defer resp.Body.Close()
-			fmt.Println("Trigger ", extension.ExtensionID, resp.Body)
-		}
-		ctx.JSON(extensions)
-	})
+	c := cron.New()
+	var triggers Triggers
+	err := getTriggerExtensions("OnTime", &triggers)
+	if err != nil {
+		return
+	}
+	// Create cron for each matching Extension
+	for _, trigger := range triggers {
+		trigger := trigger // https://github.com/golang/go/wiki/CommonMistakes#using-closures-with-goroutines
+		c.AddJob(trigger.TriggerOn, Extensions(trigger.Extensions))
+		fmt.Println("AddJob: ", trigger.TriggerOn, " -> Extensions:", len(trigger.Extensions))
+	}
+	c.Start()
 
 	app.Get("/public/hc", func(ctx iris.Context) {
 		ctx.JSON(iris.Map{
