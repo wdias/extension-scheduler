@@ -4,6 +4,7 @@ WORKDIR /go/src/app
 RUN apk update && apk add git
 RUN go get -u github.com/kataras/iris
 RUN go get -u github.com/robfig/cron
+RUN go get -u github.com/go-redis/redis
 COPY ./src .
 
 RUN go get -d -v ./...
