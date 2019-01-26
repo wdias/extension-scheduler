@@ -18,6 +18,7 @@ import (
 const (
 	adapterExtension = "http://adapter-extension.default.svc.cluster.local"
 	schedulerList    = "trigger_scheduler"
+	timeGap          = 3
 )
 
 // Timeseries Timeseries structure with timeseriesId and metadataIds
@@ -56,7 +57,6 @@ type Triggers []struct {
 // Run Post a trigger request when cron job executed
 func (extensions Extensions) Run() {
 	for _, extension := range extensions {
-		fmt.Println(extension)
 		extensionSVC := fmt.Sprint("http://extension-", strings.ToLower(extension.Extension), ".default.svc.cluster.local")
 		extensionURL := fmt.Sprint(extensionSVC, "/extension/", strings.ToLower(extension.Extension), "/trigger/", extension.ExtensionID)
 		jsonValue, _ := json.Marshal(extension)
@@ -112,67 +112,59 @@ var redisClient = redis.NewClient(&redis.Options{
 
 func main() {
 	app := iris.Default()
-	cronPrev := cron.New()
-	c := cron.New()
-	cMinutes := 0
-	ondemandCron := cron.New() // Schedule as soon as create an extension in adapter-extension. Will remove when pull all OnTime triggers.
-	ondemandCount := 0
-
-	scheduleTicker := time.NewTicker(time.Minute)
-	go func() {
-		for t := range scheduleTicker.C {
-			fmt.Println("Schedule Tick at", t)
-			cMinutes++
-			if ondemandCount > 10 && cMinutes > 60 {
-				ondemandCount = 0
-				return
-			}
-			var triggers Triggers
-			err := getTriggerExtensions("OnTime", &triggers)
-			if err != nil {
-				return
-			}
-			cronPrev = c
-			c := cron.New()
-			// Create cron for each matching Extension
-			for _, trigger := range triggers {
-				trigger := trigger // https://github.com/golang/go/wiki/CommonMistakes#using-closures-with-goroutines
-				c.AddJob(trigger.TriggerOn, Extensions(trigger.Extensions))
-				fmt.Println("AddJob: ", trigger.TriggerOn, " -> Extensions:", len(trigger.Extensions))
-			}
-			c.Start()
-			cronPrev.Stop()
-		}
-	}()
-
-	ondemandTicker := time.NewTicker(3 * time.Second)
-	go func() {
-		for t := range ondemandTicker.C {
-			fmt.Println("Tick at", t)
-			scheduleTriggers, err := redisClient.LPop(schedulerList).Result()
-			if err == redis.Nil {
-				fmt.Println("Nothing scheduled.")
-			} else if err != nil {
-				fmt.Println("Retrieve schedule failed:", err.Error())
-			} else {
-				var triggers Triggers
-				err = json.Unmarshal([]byte(scheduleTriggers), &triggers)
-				for _, trigger := range triggers {
-					trigger := trigger // https://github.com/golang/go/wiki/CommonMistakes#using-closures-with-goroutines
-					c.AddJob(trigger.TriggerOn, Extensions(trigger.Extensions))
-					fmt.Println("AddJob: ", trigger.TriggerOn, " -> Extensions:", len(trigger.Extensions))
-				}
-				ondemandCount++
-			}
-		}
-	}()
-	ondemandCron.Start()
-
 	app.Get("/public/hc", func(ctx iris.Context) {
 		ctx.JSON(iris.Map{
 			"message": "OK",
 		})
 	})
 	// listen and serve on http://0.0.0.0:8080.
-	app.Run(iris.Addr(":8080"))
+	go app.Run(iris.Addr(":8080"))
+
+	cronPrev := cron.New()
+	c := cron.New()
+	cSeconds := 0
+	ondemandCount := 0
+
+	for {
+		time.Sleep(timeGap * time.Second)
+		// Read and create Jobs for newly created Extensions
+		scheduleTriggers, err := redisClient.LPop(schedulerList).Result()
+		if err == redis.Nil {
+			fmt.Println("Nothing new scheduled.")
+		} else if err != nil {
+			fmt.Println("Retrieve new schedule failed:", err.Error())
+		} else {
+			var newTriggers Triggers
+			err = json.Unmarshal([]byte(scheduleTriggers), &newTriggers)
+			for _, trigger := range newTriggers {
+				trigger := trigger // https://github.com/golang/go/wiki/CommonMistakes#using-closures-with-goroutines
+				c.AddJob(trigger.TriggerOn, Extensions(trigger.Extensions))
+				fmt.Println("AddNewJob: ", trigger.TriggerOn, " -> Extensions:", len(trigger.Extensions))
+			}
+			ondemandCount++
+		}
+		// After certain period of time or exceed amount of creating separate Jobs, discard all and place a new cron jobs
+		cSeconds++
+		if !(ondemandCount > 10 || cSeconds*timeGap > 60) {
+			continue
+		}
+		fmt.Println("Sync OnTime Schedule...")
+		var triggers Triggers
+		err = getTriggerExtensions("OnTime", &triggers)
+		if err != nil {
+			continue
+		}
+		cronPrev = c
+		c = cron.New()
+		// Create cron for each matching Extension
+		for _, trigger := range triggers {
+			trigger := trigger // https://github.com/golang/go/wiki/CommonMistakes#using-closures-with-goroutines
+			c.AddJob(trigger.TriggerOn, Extensions(trigger.Extensions))
+			fmt.Println("AddJob: ", trigger.TriggerOn, " -> Extensions:", len(trigger.Extensions))
+		}
+		c.Start()
+		cronPrev.Stop()
+		ondemandCount = 0
+		cSeconds = 0
+	}
 }
