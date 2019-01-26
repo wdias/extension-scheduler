@@ -123,7 +123,7 @@ func main() {
 	cronPrev := cron.New()
 	c := cron.New()
 	cSeconds := 0
-	ondemandCount := 0
+	ondemandCount := 100 // Sync at the startup & run the cron.Start() first time
 
 	for {
 		time.Sleep(timeGap * time.Second)
